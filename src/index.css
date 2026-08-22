@@ -1,0 +1,41 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  font-family: 'Inter', sans-serif;
+  background-color: #FBF6EF;
+  color: #2E1F17;
+}
+
+.font-display {
+  font-family: 'Fraunces', serif;
+}
+
+/* subtle grain texture for warmth, not flat */
+.bg-grain {
+  background-image: radial-gradient(rgba(46,31,23,0.035) 1px, transparent 1px);
+  background-size: 14px 14px;
+}
+
+/* pressed / popping interactive feel */
+.btn-pop {
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+.btn-pop:hover {
+  transform: translateY(-2px);
+}
+.btn-pop:active {
+  transform: translateY(0px) scale(0.98);
+}
+
+.card-pop {
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+.card-pop:hover {
+  transform: translateY(-3px);
+}
+
+::-webkit-scrollbar { width: 8px; }
+::-webkit-scrollbar-thumb { background: #D3B28C; border-radius: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
