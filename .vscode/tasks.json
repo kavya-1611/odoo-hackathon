@@ -1,0 +1,38 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Backend: Install & Setup (migrate + seed)",
+      "type": "shell",
+      "command": "npm run setup",
+      "options": { "cwd": "${workspaceFolder}/backend" }
+    },
+    {
+      "label": "Backend: Dev Server",
+      "type": "shell",
+      "command": "npm run dev",
+      "options": { "cwd": "${workspaceFolder}/backend" },
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "Frontend: Install",
+      "type": "shell",
+      "command": "npm install",
+      "options": { "cwd": "${workspaceFolder}/frontend" }
+    },
+    {
+      "label": "Frontend: Dev Server",
+      "type": "shell",
+      "command": "npm run dev",
+      "options": { "cwd": "${workspaceFolder}/frontend" },
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "Run Full Stack (Backend + Frontend)",
+      "dependsOn": ["Backend: Dev Server", "Frontend: Dev Server"],
+      "dependsOrder": "parallel"
+    }
+  ]
+}

@@ -1,0 +1,76 @@
+// PulseHR — Prisma schema
+// SQLite-compatible version
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id            String   @id @default(uuid())
+  employeeId    String   @unique
+  email         String   @unique
+  passwordHash  String
+  role          String   @default("EMPLOYEE")
+  isVerified    Boolean  @default(true)
+  createdAt     DateTime @default(now())
+
+  profile       Profile?
+  attendance    Attendance[]
+  leaveRequests LeaveRequest[]
+  payroll       Payroll?
+}
+
+model Profile {
+  id            String   @id @default(uuid())
+  userId        String   @unique
+  user          User     @relation(fields: [userId], references: [id])
+  fullName      String
+  phone         String?
+  address       String?
+  department    String?
+  designation   String?
+  joiningDate   DateTime?
+  profilePicUrl String?
+}
+
+model Attendance {
+  id       String   @id @default(uuid())
+  userId   String
+  user     User    @relation(fields: [userId], references: [id])
+  date     DateTime
+  checkIn  DateTime?
+  checkOut DateTime?
+  status   String   @default("PRESENT")
+
+  @@index([userId, date])
+}
+
+model LeaveRequest {
+  id           String   @id @default(uuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id])
+  leaveType    String
+  startDate    DateTime
+  endDate      DateTime
+  remarks      String?
+  status       String   @default("PENDING")
+  aiSuggestion String?
+  adminComment String?
+  createdAt    DateTime @default(now())
+}
+
+model Payroll {
+  id          String   @id @default(uuid())
+  userId      String   @unique
+  user        User     @relation(fields: [userId], references: [id])
+  basicSalary Float
+  allowances  Float    @default(0)
+  deductions  Float    @default(0)
+  netPay      Float
+  updatedAt   DateTime @updatedAt
+}
