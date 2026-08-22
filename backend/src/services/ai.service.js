@@ -1,66 +1,98 @@
 /**
- * AI Orchestrator for PulseHR.
+ * AI Orchestrator for PulseHR using Google Gemini.
  *
- * Design principle: Claude never touches the database directly. It can only
- * request one of the typed "tools" defined below; this backend validates the
- * request, executes the actual Prisma query/mutation, and returns the result
- * to Claude to summarize back to the user. This keeps every AI-driven action
- * auditable, permission-scoped, and safe from hallucinated writes.
+ * Gemini never touches the database directly. It can only request one of
+ * the typed tools below. The backend validates and executes those tools
+ * against Prisma, scoped to the authenticated user.
  */
 
-const Anthropic = require("@anthropic-ai/sdk");
+const { GoogleGenAI } = require("@google/genai");
 const prisma = require("../config/prisma");
 
-const MODEL = "claude-sonnet-4-6";
+const MODEL = "gemini-2.5-flash";
 
 function getClient() {
-  if (!process.env.ANTHROPIC_API_KEY) return null;
-  return new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  if (!process.env.GEMINI_API_KEY) return null;
+
+  return new GoogleGenAI({
+    apiKey: process.env.GEMINI_API_KEY,
+  });
 }
 
 // ---------------------------------------------------------------------------
-// Tool definitions exposed to Claude for the employee-facing Copilot chat.
+// Gemini function declarations
 // ---------------------------------------------------------------------------
+
 const tools = [
   {
-    name: "apply_leave",
-    description: "Submit a leave request on behalf of the current employee.",
-    input_schema: {
-      type: "object",
-      properties: {
-        leaveType: { type: "string", enum: ["PAID", "SICK", "UNPAID"] },
-        startDate: { type: "string", description: "ISO date, e.g. 2026-08-25" },
-        endDate: { type: "string", description: "ISO date, e.g. 2026-08-27" },
-        remarks: { type: "string" },
+    functionDeclarations: [
+      {
+        name: "apply_leave",
+        description: "Submit a leave request on behalf of the current employee.",
+        parametersJsonSchema: {
+          type: "object",
+          properties: {
+            leaveType: {
+              type: "string",
+              enum: ["PAID", "SICK", "UNPAID"],
+            },
+            startDate: {
+              type: "string",
+              description: "ISO date, e.g. 2026-08-25",
+            },
+            endDate: {
+              type: "string",
+              description: "ISO date, e.g. 2026-08-27",
+            },
+            remarks: {
+              type: "string",
+            },
+          },
+          required: ["leaveType", "startDate", "endDate"],
+        },
       },
-      required: ["leaveType", "startDate", "endDate"],
-    },
-  },
-  {
-    name: "get_my_attendance",
-    description: "Fetch the current employee's recent attendance records.",
-    input_schema: {
-      type: "object",
-      properties: {
-        range: { type: "string", enum: ["daily", "weekly"] },
+
+      {
+        name: "get_my_attendance",
+        description:
+          "Fetch the current employee's recent attendance records.",
+        parametersJsonSchema: {
+          type: "object",
+          properties: {
+            range: {
+              type: "string",
+              enum: ["daily", "weekly"],
+            },
+          },
+        },
       },
-      required: [],
-    },
-  },
-  {
-    name: "get_my_leave_balance_summary",
-    description: "Summarize the current employee's leave history (approved/pending/rejected counts).",
-    input_schema: { type: "object", properties: {} },
+
+      {
+        name: "get_my_leave_balance_summary",
+        description:
+          "Summarize the current employee's leave history with approved, pending and rejected counts.",
+        parametersJsonSchema: {
+          type: "object",
+          properties: {},
+        },
+      },
+    ],
   },
 ];
 
-// Executes a tool call against the real database, scoped to the requesting user.
+// ---------------------------------------------------------------------------
+// Execute tools against the real database
+// ---------------------------------------------------------------------------
+
 async function executeTool(name, input, userId) {
   switch (name) {
     case "apply_leave": {
       if (new Date(input.startDate) > new Date(input.endDate)) {
-        return { error: "startDate must be before endDate." };
+        return {
+          error: "startDate must be before endDate.",
+        };
       }
+
       const leave = await prisma.leaveRequest.create({
         data: {
           userId,
@@ -70,141 +102,267 @@ async function executeTool(name, input, userId) {
           remarks: input.remarks || null,
         },
       });
-      return { success: true, leaveId: leave.id, status: leave.status };
+
+      return {
+        success: true,
+        leaveId: leave.id,
+        status: leave.status,
+      };
     }
 
     case "get_my_attendance": {
       const days = input.range === "weekly" ? 7 : 1;
+
       const since = new Date();
       since.setDate(since.getDate() - days);
+
       const records = await prisma.attendance.findMany({
-        where: { userId, date: { gte: since } },
-        orderBy: { date: "desc" },
+        where: {
+          userId,
+          date: {
+            gte: since,
+          },
+        },
+        orderBy: {
+          date: "desc",
+        },
       });
-      return { records };
+
+      return {
+        records,
+      };
     }
 
     case "get_my_leave_balance_summary": {
-      const all = await prisma.leaveRequest.findMany({ where: { userId } });
-      const summary = {
+      const all = await prisma.leaveRequest.findMany({
+        where: {
+          userId,
+        },
+      });
+
+      return {
         approved: all.filter((l) => l.status === "APPROVED").length,
         pending: all.filter((l) => l.status === "PENDING").length,
         rejected: all.filter((l) => l.status === "REJECTED").length,
       };
-      return summary;
     }
 
     default:
-      return { error: `Unknown tool: ${name}` };
+      return {
+        error: `Unknown tool: ${name}`,
+      };
   }
 }
 
-/**
- * Runs a single-turn agentic loop: send the user's message + tool
- * definitions to Claude, execute any tool calls it requests, feed the
- * results back, and return Claude's final natural-language reply.
- */
-async function chatWithCopilot({ message, userId, history = [] }) {
+// ---------------------------------------------------------------------------
+// Employee AI Copilot
+// ---------------------------------------------------------------------------
+
+async function chatWithCopilot({
+  message,
+  userId,
+  history = [],
+}) {
   const client = getClient();
+
   if (!client) {
     return {
       reply:
-        "AI Copilot isn't configured yet — add an ANTHROPIC_API_KEY to backend/.env to enable natural-language actions.",
+        "AI Copilot isn't configured yet — add GEMINI_API_KEY to backend/.env.",
     };
   }
 
-  const messages = [...history, { role: "user", content: message }];
+  const contents = [];
 
-  let response = await client.messages.create({
-    model: MODEL,
-    max_tokens: 1024,
-    system:
-      "You are PulseHR's employee assistant. You can apply leave and check attendance ONLY for the " +
-      "currently authenticated employee via the provided tools. Be concise and confirm actions clearly. " +
-      "Never invent data — always use a tool to look up real information before answering questions about " +
-      "attendance or leave.",
-    tools,
-    messages,
-  });
+  // Convert existing history into Gemini-compatible contents.
+  for (const item of history) {
+    if (!item || !item.role || !item.content) continue;
 
-  // Agentic loop: keep executing tools until Claude returns a plain text answer.
-  while (response.stop_reason === "tool_use") {
-    const toolUseBlocks = response.content.filter((b) => b.type === "tool_use");
-    const toolResults = [];
+    let text = "";
 
-    for (const block of toolUseBlocks) {
-      const result = await executeTool(block.name, block.input, userId);
-      toolResults.push({
-        type: "tool_result",
-        tool_use_id: block.id,
-        content: JSON.stringify(result),
-      });
+    if (typeof item.content === "string") {
+      text = item.content;
+    } else if (Array.isArray(item.content)) {
+      text = item.content
+        .filter((part) => typeof part?.text === "string")
+        .map((part) => part.text)
+        .join("\n");
     }
 
-    messages.push({ role: "assistant", content: response.content });
-    messages.push({ role: "user", content: toolResults });
+    if (!text) continue;
 
-    response = await client.messages.create({
-      model: MODEL,
-      max_tokens: 1024,
-      system:
-        "You are PulseHR's employee assistant. Summarize tool results clearly and confirm any action taken.",
-      tools,
-      messages,
+    contents.push({
+      role: item.role === "assistant" ? "model" : "user",
+      parts: [{ text }],
     });
   }
 
-  const finalText = response.content.find((b) => b.type === "text")?.text || "Done.";
-  return { reply: finalText, messages };
+  contents.push({
+    role: "user",
+    parts: [{ text: message }],
+  });
+
+  const config = {
+    systemInstruction:
+      "You are PulseHR's employee assistant. " +
+      "You can apply leave and check attendance ONLY for the currently " +
+      "authenticated employee using the provided tools. " +
+      "Be concise and confirm actions clearly. " +
+      "Never invent attendance or leave information. " +
+      "Always use the appropriate tool when the user asks about real " +
+      "attendance or leave data.",
+    tools,
+  };
+
+  let response = await client.models.generateContent({
+    model: MODEL,
+    contents,
+    config,
+  });
+
+  // Gemini function-calling loop.
+  for (let iteration = 0; iteration < 5; iteration++) {
+    const functionCalls = response.functionCalls || [];
+
+    if (functionCalls.length === 0) {
+      return {
+        reply:
+          response.text ||
+          "I couldn't generate a response. Please try again.",
+      };
+    }
+
+    const functionResponses = [];
+
+    for (const call of functionCalls) {
+      const result = await executeTool(
+        call.name,
+        call.args || {},
+        userId
+      );
+
+      functionResponses.push({
+        functionResponse: {
+          name: call.name,
+          response: result,
+        },
+      });
+    }
+
+    contents.push({
+      role: "model",
+      parts: functionCalls.map((call) => ({
+        functionCall: {
+          name: call.name,
+          args: call.args || {},
+        },
+      })),
+    });
+
+    contents.push({
+      role: "user",
+      parts: functionResponses,
+    });
+
+    response = await client.models.generateContent({
+      model: MODEL,
+      contents,
+      config,
+    });
+  }
+
+  return {
+    reply: "The AI assistant took too long to complete the request.",
+  };
 }
 
-/**
- * Generates the admin's daily AI Pulse Briefing: a short natural-language
- * summary of attendance state, pending approvals, and anything that needs
- * attention today — computed from real aggregated data, not invented.
- */
+// ---------------------------------------------------------------------------
+// Admin AI Pulse Briefing
+// ---------------------------------------------------------------------------
+
 async function generatePulseBriefing() {
   const client = getClient();
 
-  const [pendingLeaves, todayAbsences, totalEmployees] = await Promise.all([
-    prisma.leaveRequest.count({ where: { status: "PENDING" } }),
-    prisma.attendance.count({
-      where: { status: "ABSENT", date: { gte: new Date(new Date().setHours(0, 0, 0, 0)) } },
+  const [
+    pendingLeaves,
+    todayAbsences,
+    totalEmployees,
+  ] = await Promise.all([
+    prisma.leaveRequest.count({
+      where: {
+        status: "PENDING",
+      },
     }),
-    prisma.user.count({ where: { role: "EMPLOYEE" } }),
+
+    prisma.attendance.count({
+      where: {
+        status: "ABSENT",
+        date: {
+          gte: new Date(
+            new Date().setHours(0, 0, 0, 0)
+          ),
+        },
+      },
+    }),
+
+    prisma.user.count({
+      where: {
+        role: "EMPLOYEE",
+      },
+    }),
   ]);
 
-  const stats = { pendingLeaves, todayAbsences, totalEmployees };
+  const stats = {
+    pendingLeaves,
+    todayAbsences,
+    totalEmployees,
+  };
 
   if (!client) {
     return {
-      briefing: `You have ${pendingLeaves} pending leave request(s) and ${todayAbsences} absence(s) recorded today out of ${totalEmployees} employees. (Add an ANTHROPIC_API_KEY for AI-written summaries.)`,
+      briefing:
+        `You have ${pendingLeaves} pending leave request(s) and ` +
+        `${todayAbsences} absence(s) recorded today out of ` +
+        `${totalEmployees} employees. ` +
+        `(Add a GEMINI_API_KEY for AI-written summaries.)`,
       stats,
     };
   }
 
-  const response = await client.messages.create({
+  const response = await client.models.generateContent({
     model: MODEL,
-    max_tokens: 300,
-    system:
-      "You write extremely concise (2-3 sentence) daily HR briefings for an admin dashboard, based only " +
-      "on the numeric facts given. Be direct and actionable. Never invent names or numbers not provided.",
-    messages: [
+    contents: [
       {
         role: "user",
-        content: `Write today's HR pulse briefing from this data: ${JSON.stringify(stats)}`,
+        parts: [
+          {
+            text:
+              `Write today's HR pulse briefing from this data: ` +
+              `${JSON.stringify(stats)}`,
+          },
+        ],
       },
     ],
+    config: {
+      systemInstruction:
+        "You write extremely concise 2-3 sentence daily HR briefings " +
+        "for an admin dashboard. Use only the numeric facts provided. " +
+        "Be direct and actionable. Never invent names or numbers.",
+    },
   });
 
-  const briefing = response.content.find((b) => b.type === "text")?.text || "";
-  return { briefing, stats };
+  return {
+    briefing:
+      response.text ||
+      "No briefing could be generated.",
+    stats,
+  };
 }
 
-/**
- * Generates an explainable AI recommendation (approve/reject + reasoning)
- * for a pending leave request, based on real leave-history data.
- */
+// ---------------------------------------------------------------------------
+// Smart Approve
+// ---------------------------------------------------------------------------
+
 async function generateSmartApproveSuggestion({
   employeeName,
   leaveType,
@@ -214,23 +372,47 @@ async function generateSmartApproveSuggestion({
   priorApprovedLeaves,
 }) {
   const client = getClient();
-  const facts = { employeeName, leaveType, startDate, endDate, remarks, priorApprovedLeaves };
+
+  const facts = {
+    employeeName,
+    leaveType,
+    startDate,
+    endDate,
+    remarks,
+    priorApprovedLeaves,
+  };
 
   if (!client) {
-    return "AI recommendation unavailable — add an ANTHROPIC_API_KEY to enable Smart Approve.";
+    return "AI recommendation unavailable — add GEMINI_API_KEY to enable Smart Approve.";
   }
 
-  const response = await client.messages.create({
+  const response = await client.models.generateContent({
     model: MODEL,
-    max_tokens: 200,
-    system:
-      "You are an HR decision-support assistant. Given leave request facts, respond with a short " +
-      "recommendation in the format: 'Suggest: Approve|Reject — <one sentence reasoning>'. Be conservative: " +
-      "recommend Reject only for clear policy concerns (e.g. excessive unpaid leave frequency), otherwise Approve.",
-    messages: [{ role: "user", content: `Leave request facts: ${JSON.stringify(facts)}` }],
+    contents: [
+      {
+        role: "user",
+        parts: [
+          {
+            text:
+              `Leave request facts: ${JSON.stringify(facts)}`,
+          },
+        ],
+      },
+    ],
+    config: {
+      systemInstruction:
+        "You are an HR decision-support assistant. " +
+        "Given leave request facts, respond in this exact format: " +
+        "'Suggest: Approve|Reject — <one sentence reasoning>'. " +
+        "Be conservative. Recommend Reject only for clear policy concerns, " +
+        "otherwise recommend Approve.",
+    },
   });
 
-  return response.content.find((b) => b.type === "text")?.text || "Suggest: Approve — no concerns found.";
+  return (
+    response.text ||
+    "Suggest: Approve — no concerns found."
+  );
 }
 
 module.exports = {

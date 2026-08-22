@@ -23,9 +23,12 @@ router.post("/chat", validate(chatSchema), async (req, res) => {
     });
     res.json(result);
   } catch (err) {
-    console.error("AI chat error:", err);
-    res.status(500).json({ error: "The AI copilot ran into an issue. Please try again." });
-  }
+  console.error("AI chat error:", err);
+  res.status(500).json({
+    error: err.message,
+    type: err.constructor?.name,
+  });
+}
 });
 
 // GET /api/ai/pulse-briefing — admin-only daily summary
